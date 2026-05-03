@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Retro Platformer Adventure</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #333;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 50px rgba(0,0,0,0.5);
+            border: 4px solid #000;
+        }
+        canvas {
+            display: block;
+            background-color: #5c94fc; /* Mario Sky Blue */
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+            will-change: transform;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            text-shadow: 2px 2px 0 #000;
+            font-weight: bold;
+            pointer-events: none;
+        }
+        #menu-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 10;
+            text-align: center;
+        }
+        #menu-title {
+            margin: 0 0 16px;
+            font-size: 2.25rem;
+            font-weight: 700;
+            color: #facc15;
+            text-shadow: 2px 2px 0 #000;
+        }
+        #menu-title.menu-title-loss {
+            color: #ef4444;
+        }
+        #menu-title.menu-title-win {
+            color: #4ade80;
+        }
+        .menu-description {
+            margin: 0 0 24px;
+        }
+        #start-btn {
+            background: #dc2626;
+            color: #fff;
+            padding: 12px 32px;
+            border: 0;
+            border-radius: 9999px;
+            font-size: 1.25rem;
+            font-weight: 700;
+            cursor: pointer;
+            transform: scale(1);
+            transition: transform 0.15s ease, background-color 0.15s ease;
+        }
+        #start-btn:hover {
+            background: #b91c1c;
+            transform: scale(1.05);
+        }
+        #start-btn:active {
+            transform: scale(0.98);
+        }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui-overlay">
+        <div>SCORE: <span id="score">0</span></div>
+        <div>LIVES: <span id="lives">3</span></div>
+    </div>
+
+    <div id="menu-overlay">
+        <h1 id="menu-title">SUPER ADVENTURE</h1>
+        <p class="menu-description">左右キー: 移動 | スペース: ジャンプ</p>
+        <button id="start-btn">
+            START GAME
+        </button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    const scoreEl = document.getElementById('score');
+    const livesEl = document.getElementById('lives');
+    const startBtn = document.getElementById('start-btn');
+    const menuOverlay = document.getElementById('menu-overlay');
+    const menuTitle = document.getElementById('menu-title');
+
+    // ゲーム設定
+    const GRAVITY = 0.8;
+    const JUMP_FORCE = -15;
+    const ACCEL = 1.2;
+    const FRICTION = 0.8;
+    const MAX_SPEED = 6;
+    const JUMP_CUT_MULTIPLIER = 0.5;
+    const COYOTE_TIME_MAX = 6;
+    const JUMP_BUFFER_MAX = 6;
+    const CANVAS_WIDTH = 800;
+    const CANVAS_HEIGHT = 480;
+    const TILE_SIZE = 40;
+    const PLATFORM_CHECK_MARGIN = TILE_SIZE * 2;
+    const MAX_PARTICLES = 80;
+    const MAX_FLOATING_TEXTS = 12;
+    const MAX_DELTA_TIME = 2.5;
+
+    canvas.width = CANVAS_WIDTH;
+    canvas.height = CANVAS_HEIGHT;
+    ctx.imageSmoothingEnabled = false;
+
+    const GameState = {
+        MENU: 'menu',
+        PLAYING: 'playing',
+        PAUSED: 'paused',
+        GAME_OVER: 'gameover',
+        CLEAR: 'clear'
+    };
+
+    let score = 0;
+    let lives = 3;
+    let gameState = GameState.MENU;
+    let cameraX = 0;
+    let levelWidth = 0;
+    let particles = [];
+    let floatingTexts = [];
+    let screenShake = 0;
+    let shakeOffsetX = 0;
+    let shakeOffsetY = 0;
+    let lastRenderedScore = null;
+    let lastRenderedLives = null;
+    let lastTime = 0;
+
+    const keys = {};
+    let jumpPressed = false;
+    let coyoteTime = 0;
+    let jumpBuffer = 0;
+
+    // プレイヤーオブジェクト
+    const player = {
+        x: 100,
+        y: 300,
+        width: 32,
+        height: 32,
+        velX: 0,
+        velY: 0,
+        grounded: false,
+        color: '#ff0000',
+        draw() {
+            const drawX = Math.round(this.x - cameraX);
+            const drawY = Math.round(this.y);
+            ctx.fillStyle = this.color;
+            // プレイヤーの体
+            ctx.fillRect(drawX, drawY, this.width, this.height);
+            // 目（向きに合わせて描画）
+            ctx.fillStyle = 'white';
+            const eyeOffset = this.velX >= 0 ? 20 : 5;
+            ctx.fillRect(drawX + eyeOffset, drawY + 5, 8, 8);
+        }
+    };
+
+    class SoundManager {
+        constructor() {
+            this.audioContext = null;
+            this.enabled = true;
+        }
+
+        async init() {
+            if (!this.audioContext) {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContextClass) return;
+
+                this.audioContext = new AudioContextClass();
+
+                // 初回タップで無音バッファを再生してモバイルの音声ロックを外す
+                const buffer = this.audioContext.createBuffer(1, 1, 22050);
+                const source = this.audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(this.audioContext.destination);
+                source.start(0);
+            }
+
+            if (this.audioContext.state === 'suspended') {
+                await this.audioContext.resume();
+            }
+        }
+
+        createSound(frequency, type = 'square', duration = 0.1, volume = 0.2, sweep = 1) {
+            if (!this.enabled || !this.audioContext) return;
+
+            const currentTime = this.audioContext.currentTime;
+            const oscillator = this.audioContext.createOscillator();
+            const gainNode = this.audioContext.createGain();
+
+            oscillator.type = type;
+            oscillator.frequency.setValueAtTime(frequency, currentTime);
+            oscillator.frequency.exponentialRampToValueAtTime(
+                Math.max(40, frequency * sweep),
+                currentTime + duration
+            );
+
+            gainNode.gain.setValueAtTime(volume, currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, currentTime + duration);
+
+            oscillator.connect(gainNode);
+            gainNode.connect(this.audioContext.destination);
+
+            oscillator.start(currentTime);
+            oscillator.stop(currentTime + duration);
+        }
+
+        playJump() {
+            this.createSound(220, 'square', 0.12, 0.18, 1.8);
+        }
+
+        playCoin() {
+            this.createSound(660, 'sine', 0.18, 0.16, 1.5);
+        }
+
+        playHit() {
+            this.createSound(120, 'sawtooth', 0.3, 0.22, 0.55);
+        }
+
+        playStomp() {
+            this.createSound(180, 'triangle', 0.12, 0.18, 0.8);
+        }
+
+        playClear() {
+            this.createSound(523.25, 'triangle', 0.16, 0.18, 1.2);
+            this.createSound(783.99, 'sine', 0.24, 0.12, 1.05);
+        }
+    }
+
+    const soundManager = new SoundManager();
+
+    class Particle {
+        constructor(x, y, velX, velY, color, life, size = 4) {
+            this.x = x;
+            this.y = y;
+            this.velX = velX;
+            this.velY = velY;
+            this.color = color;
+            this.life = life;
+            this.maxLife = life;
+            this.size = size;
+        }
+
+        update(deltaTime) {
+            this.x += this.velX * deltaTime;
+            this.y += this.velY * deltaTime;
+            this.velY += 0.2 * deltaTime;
+            this.life -= deltaTime;
+        }
+
+        draw() {
+            const alpha = this.life / this.maxLife;
+            ctx.globalAlpha = Math.max(0, alpha);
+            ctx.fillStyle = this.color;
+            ctx.fillRect(Math.round(this.x - cameraX), Math.round(this.y), this.size, this.size);
+            ctx.globalAlpha = 1;
+        }
+    }
+
+    class Enemy {
+        constructor(x, y, type) {
+            this.x = x;
+            this.y = y;
+            this.w = 32;
+            this.h = 32;
+            this.type = type;
+            this.dead = false;
+            this.grounded = false;
+            this.velX = type === 'walker' ? -1.6 : 0;
+            this.velY = 0;
+            this.jumpCooldown = 75 + Math.floor(Math.random() * 45);
+            this.color = type === 'walker' ? '#800000' : '#0f8f3a';
+        }
+
+        update(deltaTime) {
+            if (this.dead) return;
+
+            if (this.type === 'walker') {
+                this.updateWalker(deltaTime);
+            } else if (this.type === 'jumper') {
+                this.updateJumper(deltaTime);
+            }
+        }
+
+        updateWalker(deltaTime) {
+            this.velY += GRAVITY * deltaTime;
+            this.x += this.velX * deltaTime;
+            resolveEnemyHorizontalCollision(this);
+            this.y += this.velY * deltaTime;
+            resolveEnemyVerticalCollision(this);
+
+            if (this.grounded && !hasGroundAhead(this)) {
+                this.velX *= -1;
+            }
+        }
+
+        updateJumper(deltaTime) {
+            this.jumpCooldown -= deltaTime;
+            this.velY += GRAVITY * 0.9 * deltaTime;
+            this.y += this.velY * deltaTime;
+            resolveEnemyVerticalCollision(this);
+
+            if (this.jumpCooldown <= 0 && this.grounded) {
+                this.velY = -12;
+                this.grounded = false;
+                this.jumpCooldown = 90 + Math.floor(Math.random() * 45);
+                createParticles(this.x + this.w / 2, this.y + this.h, 6, '#b7ffb7', 3);
+            }
+        }
+
+        draw() {
+            if (this.dead || !isVisibleOnScreen(this.x, this.w)) return;
+            const drawX = Math.round(this.x - cameraX);
+            const drawY = Math.round(this.y);
+
+            ctx.fillStyle = this.color;
+            ctx.fillRect(drawX, drawY, this.w, this.h);
+
+            ctx.fillStyle = 'white';
+            if (this.type === 'walker') {
+                ctx.fillRect(drawX + 5, drawY + 5, 6, 6);
+                ctx.fillRect(drawX + 21, drawY + 5, 6, 6);
+            } else {
+                ctx.fillRect(drawX + 8, drawY + 5, 5, 5);
+                ctx.fillRect(drawX + 19, drawY + 5, 5, 5);
+                ctx.fillStyle = '#d9ffd9';
+                ctx.fillRect(drawX + 10, drawY + 20, 12, 4);
+            }
+        }
+    }
+
+    function createParticles(x, y, count, color, size = 4) {
+        const availableSlots = Math.max(0, MAX_PARTICLES - particles.length);
+        const spawnCount = Math.min(count, availableSlots);
+
+        if (spawnCount <= 0) return;
+
+        for (let i = 0; i < spawnCount; i++) {
+            particles.push(new Particle(
+                x + Math.random() * 20 - 10,
+                y + Math.random() * 20 - 10,
+                Math.random() * 6 - 3,
+                Math.random() * -4 - 2,
+                color,
+                30 + Math.random() * 20,
+                size
+            ));
+        }
+    }
+
+    function updateParticles(deltaTime) {
+        particles = particles.filter(particle => particle.life > 0);
+        particles.forEach(particle => particle.update(deltaTime));
+    }
+
+    function addFloatingText(text, x, y, color = '#fff') {
+        if (floatingTexts.length >= MAX_FLOATING_TEXTS) {
+            floatingTexts.shift();
+        }
+
+        floatingTexts.push({
+            text,
+            x,
+            y,
+            vy: -2,
+            alpha: 1,
+            color,
+            scale: 1.5
+        });
+    }
+
+    function updateFloatingTexts(deltaTime) {
+        floatingTexts = floatingTexts.filter(text => text.alpha > 0);
+        floatingTexts.forEach(text => {
+            text.y += text.vy * deltaTime;
+            text.vy *= Math.pow(0.95, deltaTime);
+            text.alpha -= 0.02 * deltaTime;
+            text.scale = Math.max(1, text.scale - 0.02 * deltaTime);
+        });
+    }
+
+    function drawFloatingTexts() {
+        floatingTexts.forEach(text => {
+            ctx.save();
+            ctx.globalAlpha = text.alpha;
+            ctx.fillStyle = text.color;
+            ctx.font = `${16 * text.scale}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.fillText(text.text, Math.round(text.x - cameraX), Math.round(text.y));
+            ctx.restore();
+        });
+    }
+
+    function addScreenShake(intensity) {
+        screenShake = Math.max(screenShake, intensity);
+    }
+
+    function updateScreenShake(deltaTime) {
+        if (screenShake > 0) {
+            shakeOffsetX = (Math.random() - 0.5) * screenShake;
+            shakeOffsetY = (Math.random() - 0.5) * screenShake;
+            screenShake *= Math.pow(0.9, deltaTime);
+            if (screenShake < 0.1) {
+                screenShake = 0;
+                shakeOffsetX = 0;
+                shakeOffsetY = 0;
+            }
+        } else {
+            shakeOffsetX = 0;
+            shakeOffsetY = 0;
+        }
+    }
+
+    function isVisibleOnScreen(x, width, margin = TILE_SIZE) {
+        return x + width >= cameraX - margin && x <= cameraX + CANVAS_WIDTH + margin;
+    }
+
+    function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+        return ax < bx + bw &&
+            ax + aw > bx &&
+            ay < by + bh &&
+            ay + ah > by;
+    }
+
+    function isPlatformNearEnemy(platform, enemy) {
+        return !(platform.x + platform.w < enemy.x - PLATFORM_CHECK_MARGIN ||
+            platform.x > enemy.x + enemy.w + PLATFORM_CHECK_MARGIN ||
+            platform.y + platform.h < enemy.y - PLATFORM_CHECK_MARGIN ||
+            platform.y > enemy.y + enemy.h + PLATFORM_CHECK_MARGIN);
+    }
+
+    function resolveEnemyHorizontalCollision(enemy) {
+        for (const platform of platforms) {
+            if (!isPlatformNearEnemy(platform, enemy)) continue;
+            if (!rectsOverlap(enemy.x, enemy.y, enemy.w, enemy.h, platform.x, platform.y, platform.w, platform.h)) continue;
+
+            if (enemy.velX > 0) {
+                enemy.x = platform.x - enemy.w;
+            } else if (enemy.velX < 0) {
+                enemy.x = platform.x + platform.w;
+            }
+            enemy.velX *= -1;
+            break;
+        }
+    }
+
+    function resolveEnemyVerticalCollision(enemy) {
+        enemy.grounded = false;
+
+        for (const platform of platforms) {
+            if (!isPlatformNearEnemy(platform, enemy)) continue;
+            if (!rectsOverlap(enemy.x, enemy.y, enemy.w, enemy.h, platform.x, platform.y, platform.w, platform.h)) continue;
+
+            if (enemy.velY >= 0) {
+                enemy.y = platform.y - enemy.h;
+                enemy.velY = 0;
+                enemy.grounded = true;
+            } else {
+                enemy.y = platform.y + platform.h;
+                enemy.velY = 0;
+            }
+            break;
+        }
+    }
+
+    function hasGroundAhead(enemy) {
+        const probeX = enemy.velX >= 0 ? enemy.x + enemy.w + 2 : enemy.x - 2;
+        const probeY = enemy.y + enemy.h + 2;
+
+        return platforms.some(platform =>
+            probeX >= platform.x &&
+            probeX <= platform.x + platform.w &&
+            probeY >= platform.y &&
+            probeY <= platform.y + platform.h + 4
+        );
+    }
+
+    // ステージデータ
+    const levelMap = [
+        "                                                                                               ",
+        "                                                                                               ",
+        "  P   C      C           C                 C            C                    C                 ",
+        "       BB           E           BBB                J           BB                              ",
+        "                          C              BB                 C             E                    ",
+        "   BB          C                 BB            C                 BBB                           ",
+        "                J        BBB                E            BBB           C                       ",
+        "                                    C               J                     BB                |  ",
+        "   B    BB   B   B    B   BB   B   B    B   BB   B   B    B   BB   B   B    B   BB         ",
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG",
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"
+    ];
+
+    let platforms = [];
+    let coins = [];
+    let enemies = [];
+    let goal = null;
+
+    function initLevel() {
+        platforms = [];
+        coins = [];
+        enemies = [];
+        cameraX = 0;
+        levelWidth = 0;
+        particles = [];
+        floatingTexts = [];
+        screenShake = 0;
+        shakeOffsetX = 0;
+        shakeOffsetY = 0;
+        player.x = 100;
+        player.y = 100;
+        player.velX = 0;
+        player.velY = 0;
+        player.grounded = false;
+        jumpPressed = false;
+        coyoteTime = 0;
+        jumpBuffer = 0;
+        goal = null;
+
+        levelMap.forEach((row, y) => {
+            levelWidth = Math.max(levelWidth, row.length * TILE_SIZE);
+            for (let x = 0; x < row.length; x++) {
+                const char = row[x];
+                const px = x * TILE_SIZE;
+                const py = y * TILE_SIZE;
+
+                if (char === 'G' || char === 'B') {
+                    platforms.push({ x: px, y: py, w: TILE_SIZE, h: TILE_SIZE, type: char });
+                } else if (char === 'C') {
+                    coins.push({ x: px + 10, y: py + 10, w: 20, h: 20, collected: false });
+                } else if (char === 'P') {
+                    player.x = px;
+                    player.y = py;
+                } else if (char === 'E') {
+                    enemies.push(new Enemy(px + 4, py + 8, 'walker'));
+                } else if (char === 'J') {
+                    enemies.push(new Enemy(px + 4, py + 8, 'jumper'));
+                } else if (char === '|') {
+                    const goalTop = Math.max(40, py - TILE_SIZE * 4);
+                    goal = { x: px + 10, y: goalTop, w: 12, h: CANVAS_HEIGHT - goalTop };
+                }
+            }
+        });
+
+        if (!goal) {
+            goal = { x: levelWidth - TILE_SIZE * 2, y: 40, w: 12, h: CANVAS_HEIGHT - 40 };
+        }
+
+        updateUI(true);
+    }
+
+    function isJumpKey(code) {
+        return code === 'Space' || code === 'ArrowUp' || code === 'KeyW';
+    }
+
+    function isJumpHeld() {
+        return keys['Space'] || keys['ArrowUp'] || keys['KeyW'];
+    }
+
+    // 入力監視
+    window.addEventListener('keydown', e => {
+        const wasPressed = keys[e.code];
+        keys[e.code] = true;
+
+        if (isJumpKey(e.code) && !wasPressed) {
+            jumpPressed = true;
+            jumpBuffer = JUMP_BUFFER_MAX;
+        }
+    });
+
+    window.addEventListener('keyup', e => {
+        keys[e.code] = false;
+    });
+
+    window.addEventListener('keydown', e => {
+        if (e.code === 'Escape') {
+            if (gameState === GameState.PLAYING) {
+                pauseGame();
+            } else if (gameState === GameState.PAUSED) {
+                resumeGame();
+            }
+        }
+    });
+
+    function update(deltaTime) {
+        updateParticles(deltaTime);
+        updateFloatingTexts(deltaTime);
+        updateScreenShake(deltaTime);
+
+        switch (gameState) {
+            case GameState.PLAYING:
+                updateGameplay(deltaTime);
+                break;
+            case GameState.PAUSED:
+            case GameState.MENU:
+            case GameState.GAME_OVER:
+            case GameState.CLEAR:
+            default:
+                break;
+        }
+    }
+
+    function updateGameplay(deltaTime) {
+        if (player.grounded) {
+            coyoteTime = COYOTE_TIME_MAX;
+        } else {
+            coyoteTime = Math.max(0, coyoteTime - deltaTime);
+        }
+
+        if (jumpBuffer > 0) {
+            jumpBuffer = Math.max(0, jumpBuffer - deltaTime);
+        }
+
+        const jumpHeld = isJumpHeld();
+
+        // 左右移動
+        if (keys['ArrowRight'] || keys['KeyD']) {
+            player.velX += ACCEL * deltaTime;
+        } else if (keys['ArrowLeft'] || keys['KeyA']) {
+            player.velX -= ACCEL * deltaTime;
+        } else {
+            player.velX *= Math.pow(FRICTION, deltaTime);
+            if (Math.abs(player.velX) < 0.05) {
+                player.velX = 0;
+            }
+        }
+        player.velX = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, player.velX));
+
+        // コヨーテタイムとジャンプバッファを使ってジャンプ受付を緩和する
+        if ((jumpPressed || jumpBuffer > 0) && coyoteTime > 0) {
+            player.velY = JUMP_FORCE;
+            player.grounded = false;
+            coyoteTime = 0;
+            jumpBuffer = 0;
+            jumpPressed = false;
+            soundManager.playJump();
+        } else {
+            jumpPressed = false;
+        }
+
+        // ボタンを早めに離したときは上昇をカットして可変ジャンプにする
+        if (!jumpHeld && player.velY < 0) {
+            player.velY *= Math.pow(JUMP_CUT_MULTIPLIER, deltaTime);
+            if (Math.abs(player.velY) < 0.5) {
+                player.velY = 0;
+            }
+        }
+
+        // 重力
+        player.velY += GRAVITY * deltaTime;
+        player.x += player.velX * deltaTime;
+        player.y += player.velY * deltaTime;
+
+        player.grounded = false;
+
+        // 地面・足場との衝突
+        platforms.forEach(p => {
+            if (p.x + p.w < player.x - PLATFORM_CHECK_MARGIN ||
+                p.x > player.x + player.width + PLATFORM_CHECK_MARGIN ||
+                p.y + p.h < player.y - PLATFORM_CHECK_MARGIN ||
+                p.y > player.y + player.height + PLATFORM_CHECK_MARGIN) {
+                return;
+            }
+
+            if (player.x < p.x + p.w &&
+                player.x + player.width > p.x &&
+                player.y < p.y + p.h &&
+                player.y + player.height > p.y) {
+                
+                // 衝突方向の判定
+                const overlapX = Math.min(player.x + player.width - p.x, p.x + p.w - player.x);
+                const overlapY = Math.min(player.y + player.height - p.y, p.y + p.h - player.y);
+
+                if (overlapX > overlapY) {
+                    if (player.velY > 0) {
+                        player.y = p.y - player.height;
+                        player.velY = 0;
+                        player.grounded = true;
+                    } else if (player.velY < 0) {
+                        player.y = p.y + p.h;
+                        player.velY = 0;
+                    }
+                } else {
+                    if (player.velX > 0) player.x = p.x - player.width;
+                    else if (player.velX < 0) player.x = p.x + p.w;
+                    player.velX = 0;
+                }
+            }
+        });
+
+        // 敵の移動と衝突
+        enemies.forEach(en => {
+            if (en.dead) return;
+            en.update(deltaTime);
+
+            // プレイヤーとの衝突
+            if (player.x < en.x + en.w &&
+                player.x + player.width > en.x &&
+                player.y < en.y + en.h &&
+                player.y + player.height > en.y) {
+                
+                // 上から踏んだか？
+                if (player.velY > 0 && player.y + player.height < en.y + 20) {
+                    en.dead = true;
+                    player.velY = JUMP_FORCE / 1.5; // 小ジャンプ
+                    score += 100;
+                    soundManager.playStomp();
+                    createParticles(en.x + en.w / 2, en.y + en.h / 2, 14, '#ffb3b3', 5);
+                    addFloatingText('+100', en.x + en.w / 2, en.y, '#ffffff');
+                    addScreenShake(6);
+                } else {
+                    die();
+                }
+            }
+        });
+
+        // コイン取得
+        coins.forEach(c => {
+            if (!c.collected && 
+                player.x < c.x + c.w &&
+                player.x + player.width > c.x &&
+                player.y < c.y + c.h &&
+                player.y + player.height > c.y) {
+                c.collected = true;
+                score += 50;
+                soundManager.playCoin();
+                createParticles(c.x + c.w / 2, c.y + c.h / 2, 10, '#ffd700', 4);
+                addFloatingText('+50', c.x + c.w / 2, c.y, '#ffd700');
+            }
+        });
+
+        // ゴール判定
+        if (rectsOverlap(player.x, player.y, player.width, player.height, goal.x, goal.y, goal.w, goal.h)) {
+            win();
+        }
+
+        // 落下死
+        if (player.y > CANVAS_HEIGHT) {
+            die();
+        }
+
+        // カメラ更新（中央付近にプレイヤーを保つ）
+        cameraX = Math.round(Math.max(0, Math.min(Math.max(0, levelWidth - CANVAS_WIDTH), player.x - CANVAS_WIDTH / 2)));
+
+        updateUI();
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(shakeOffsetX, shakeOffsetY);
+
+        // 背景の装飾（雲など）
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.beginPath();
+        ctx.arc(200 - (cameraX * 0.2) % 1000, 100, 30, 0, Math.PI * 2);
+        ctx.arc(230 - (cameraX * 0.2) % 1000, 100, 40, 0, Math.PI * 2);
+        ctx.arc(260 - (cameraX * 0.2) % 1000, 100, 30, 0, Math.PI * 2);
+        ctx.fill();
+
+        // プラットフォーム描画
+        platforms.forEach(p => {
+            if (!isVisibleOnScreen(p.x, p.w)) return;
+            const drawX = Math.round(p.x - cameraX);
+            if (p.type === 'G') ctx.fillStyle = '#8B4513'; // 土
+            else ctx.fillStyle = '#FFA500'; // レンガ
+            ctx.fillRect(drawX, p.y, p.w, p.h);
+            ctx.strokeStyle = '#000';
+            ctx.strokeRect(drawX, p.y, p.w, p.h);
+        });
+
+        // コイン描画
+        coins.forEach(c => {
+            if (c.collected) return;
+            if (!isVisibleOnScreen(c.x, c.w)) return;
+            ctx.fillStyle = '#FFD700';
+            ctx.beginPath();
+            ctx.arc(Math.round(c.x + c.w / 2 - cameraX), Math.round(c.y + c.h / 2), c.w / 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#DAA520';
+            ctx.stroke();
+        });
+
+        // 敵描画
+        enemies.forEach(en => {
+            en.draw();
+        });
+
+        // ゴール描画
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.3)';
+        ctx.fillRect(Math.round(goal.x - cameraX), 0, 10, CANVAS_HEIGHT);
+
+        particles.forEach(particle => particle.draw());
+        player.draw();
+        drawFloatingTexts();
+        ctx.restore();
+    }
+
+    function updateUI(force = false) {
+        if (force || score !== lastRenderedScore) {
+            scoreEl.innerText = score;
+            lastRenderedScore = score;
+        }
+
+        if (force || lives !== lastRenderedLives) {
+            livesEl.innerText = lives;
+            lastRenderedLives = lives;
+        }
+    }
+
+    function die() {
+        addScreenShake(10);
+        soundManager.playHit();
+        lives--;
+        if (lives <= 0) {
+            gameOver();
+        } else {
+            initLevel();
+            gameState = GameState.PLAYING;
+        }
+    }
+
+    function setOverlay(title, buttonText) {
+        menuTitle.innerText = title;
+        startBtn.innerText = buttonText;
+        menuOverlay.classList.remove('hidden');
+    }
+
+    function pauseGame() {
+        gameState = GameState.PAUSED;
+        menuTitle.classList.remove('menu-title-loss', 'menu-title-win');
+        setOverlay('PAUSED', 'RESUME');
+    }
+
+    function resumeGame() {
+        gameState = GameState.PLAYING;
+        menuOverlay.classList.add('hidden');
+    }
+
+    function gameOver() {
+        gameState = GameState.GAME_OVER;
+        menuTitle.classList.remove('menu-title-win');
+        menuTitle.classList.add('menu-title-loss');
+        setOverlay('GAME OVER', 'TRY AGAIN');
+    }
+
+    function win() {
+        gameState = GameState.CLEAR;
+        soundManager.playClear();
+        createParticles(player.x + player.width / 2, player.y + player.height / 2, 24, '#4ade80', 5);
+        addFloatingText('CLEAR!', player.x + player.width / 2, player.y - 20, '#4ade80');
+        addScreenShake(8);
+        menuTitle.classList.remove('menu-title-loss');
+        menuTitle.classList.add('menu-title-win');
+        setOverlay('COURSE CLEAR!', 'PLAY AGAIN');
+    }
+
+    function gameLoop(currentTime = 0) {
+        const rawDeltaTime = lastTime === 0 ? 1 : (currentTime - lastTime) / 16.67;
+        const deltaTime = Math.max(0.5, Math.min(MAX_DELTA_TIME, rawDeltaTime));
+        lastTime = currentTime;
+
+        update(deltaTime);
+        draw();
+        requestAnimationFrame(gameLoop);
+    }
+
+    startBtn.addEventListener('click', async () => {
+        await soundManager.init();
+
+        if (gameState === GameState.PAUSED) {
+            resumeGame();
+            return;
+        }
+
+        score = 0;
+        lives = 3;
+        lastTime = 0;
+        menuTitle.innerText = "SUPER ADVENTURE";
+        menuTitle.classList.remove('menu-title-loss', 'menu-title-win');
+        startBtn.innerText = "START GAME";
+        initLevel();
+        gameState = GameState.PLAYING;
+        menuOverlay.classList.add('hidden');
+    });
+
+    // 初回描画
+    initLevel();
+    gameLoop();
+</script>
+
+</body>
+</html>
